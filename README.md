@@ -2,7 +2,7 @@
 
 *Notes from the field. Charts from the wild.*
 
-**Full post:** [filedunderpub.substack.com](https://filedunderpub.substack.com) ← update with direct post link when published
+**Full post:** [https://filedunderpub.substack.com](https://open.substack.com/pub/filedunderpub/p/filed-under-birth-timing?r=8j5tv8&utm_campaign=post&utm_medium=web&showWelcomeOnShare=true)
 
 ---
 
