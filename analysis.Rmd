@@ -1,0 +1,208 @@
+---
+title: "Filed Under: birth timing"
+output: html_notebook
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(data.table)
+library(rstatix)
+library(scales)
+```
+
+
+## Data
+
+CDC WONDER, National Vital Statistics System — Natality, 2016–2024 expanded.
+Downloaded May 23, 2026. Years included: 2022, 2023, 2024.
+
+Query parameters:
+- Delivery method: Cesarean & Vaginal
+- Group by: State of Residence; Year; Month; Weekday; Time of Day
+- Zero values and suppressed values excluded
+
+> Centers for Disease Control and Prevention, National Center for Health Statistics.
+> National Vital Statistics System, Natality on CDC WONDER Online Database.
+> Data are from the Natality Records 2016–2024, as compiled from data provided by
+> the 57 vital statistics jurisdictions through the Vital Statistics Cooperative Program.
+> Accessed at http://wonder.cdc.gov/natality-expanded-current.html on May 23, 2026.
+
+Data were downloaded by year and delivery method and combined for analysis.
+
+Variables:
+- `state_of_residence`
+- `year` — 2022, 2023, or 2024
+- `month`
+- `weekday` — Weekday or Weekend
+- `time_of_day` — binned into 3-hour blocks
+- `delivery_method` — Cesarean or Vaginal
+- `births` — count
+
+
+```{r load}
+time_of_day_data <- readr::read_csv("data/time_of_birth_dataset.csv",
+                                    show_col_types = FALSE)
+
+cat(sprintf("Dataset: %d observations, %d variables\n",
+            nrow(time_of_day_data), ncol(time_of_day_data)))
+```
+
+
+## Completeness checks
+
+For each combination of time of day, weekday, month, year, and delivery method —
+how many of the 51 reporting areas (50 states + DC) contributed data?
+
+```{r completeness}
+time_of_day_data <- time_of_day_data %>%
+  left_join(
+    time_of_day_data %>%
+      group_by(delivery_method, time_of_day, weekday, month, year) %>%
+      count(name = "states_reported"),
+    join_by(year, month, weekday, time_of_day, delivery_method)
+  )
+
+time_of_day_data %>%
+  rstatix::get_summary_stats(states_reported, type = "quantile",
+                             probs = c(0.1, 0.25, 0.5, 0.75, 0.9))
+```
+
+Analysis is limited to timepoints where at least 47 of 51 areas reported data
+(≥ 90th percentile of states_reported), covering ~75% of raw observations.
+
+```{r filter}
+time_of_day_data_filtered <- time_of_day_data %>% filter(states_reported >= 47)
+
+cat(sprintf("Filtered dataset: %.0f%% of raw observations retained\n",
+            100 * nrow(time_of_day_data_filtered) / nrow(time_of_day_data)))
+```
+
+States with no weekend cesarean deliveries in the dataset:
+
+```{r weekend-c-coverage}
+weekend_c_states  <- time_of_day_data %>%
+  filter(weekday == "Weekend", delivery_method == "cesarean") %>%
+  distinct(state_of_residence) %>% pull()
+
+weekend_all_states <- time_of_day_data %>%
+  filter(weekday == "Weekend") %>%
+  distinct(state_of_residence) %>% pull()
+
+setdiff(weekend_all_states, weekend_c_states)
+```
+
+
+## Births by time of day
+
+Average births per day (adjusted for 5 weekdays vs. 2 weekend days), by delivery
+method and time of day.
+
+```{r wrangle}
+time_of_births_df <- time_of_day_data %>%
+  select(state_of_residence, time_of_day, time_of_day_code,
+         weekday, delivery_method, births) %>%
+  group_by(time_of_day, time_of_day_code, state_of_residence,
+           weekday, delivery_method) %>%
+  summarize(total_births = sum(births, na.rm = TRUE), .groups = "drop") %>%
+  mutate(births_per_day_ave = case_when(
+    weekday == "Weekday" ~ total_births / 5,
+    weekday == "Weekend" ~ total_births / 2
+  ))
+```
+
+Medians by time of day, delivery method, and weekday/weekend:
+
+```{r medians}
+time_of_births_df %>%
+  group_by(time_of_day, delivery_method, weekday) %>%
+  summarise(
+    median_births_per_day = median(births_per_day_ave, na.rm = TRUE),
+    n_states              = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(delivery_method, weekday, time_of_day)
+
+quantiles_df <- time_of_births_df %>%
+  group_by(time_of_day_code, delivery_method, weekday) %>%
+  rstatix::get_summary_stats(births_per_day_ave, type = "quantile",
+                             probs = c(0.1, 0.25, 0.5, 0.90, 1))
+```
+
+
+## Statistical tests
+
+Wilcoxon rank-sum tests (Mann–Whitney U) compare average births per day between
+weekday and weekend groups for each time window and delivery method. Two-sided.
+P-values adjusted for multiple comparisons using Benjamini–Hochberg (16 tests:
+8 time windows × 2 delivery methods).
+
+Shapiro–Wilk is included for transparency. Wilcoxon is used regardless, given
+expected right-skew from state-level birth volume variation (California and
+Wyoming are in the same pool).
+
+```{r normality-check}
+normality_check <- time_of_births_df %>%
+  group_by(time_of_day, delivery_method, weekday) %>%
+  shapiro_test(births_per_day_ave) %>%
+  select(time_of_day, delivery_method, weekday, statistic, p) %>%
+  arrange(delivery_method, time_of_day, weekday)
+
+normality_check
+```
+
+```{r wilcoxon}
+wilcox_results <- time_of_births_df %>%
+  group_by(time_of_day, time_of_day_code, delivery_method) %>%
+  wilcox_test(births_per_day_ave ~ weekday, paired = FALSE) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance(p.col = "p.adj")
+
+medians_wide <- time_of_births_df %>%
+  group_by(time_of_day, time_of_day_code, delivery_method, weekday) %>%
+  summarise(median_bpd = round(median(births_per_day_ave, na.rm = TRUE)),
+            .groups = "drop") %>%
+  pivot_wider(names_from = weekday, values_from = median_bpd)
+
+results_table <- wilcox_results %>%
+  left_join(medians_wide, by = c("time_of_day", "time_of_day_code", "delivery_method")) %>%
+  arrange(delivery_method, time_of_day_code) %>%
+  select(time_of_day, delivery_method, Weekday, Weekend, statistic, p, p.adj, p.adj.signif)
+
+results_table
+```
+
+
+## Finding
+
+Weekend deliveries — both vaginal and cesarean — are distributed roughly evenly
+across the 24-hour day.
+
+Weekday vaginal deliveries shift toward the afternoon. Weekday cesarean deliveries
+shift toward the morning. The daytime clustering on weekdays is absent on weekends,
+when scheduled procedures are uncommon.
+
+Two states (Vermont and Wyoming) recorded no weekend cesarean deliveries in this
+dataset across 2022–2024.
+
+
+## Observations
+
+Cesarean deliveries differ significantly between weekday and weekend in four
+consecutive time windows spanning 06:00–17:59. The largest difference is in the
+06:00–08:59 window: weekday median 1,818 births per day versus 503 on weekends
+(W = 1843.0, p.adj < 0.001). The 09:00–11:59 (W = 1712.0, p.adj = 0.008),
+12:00–14:59 (W = 1734.5, p.adj = 0.001), and 15:00–17:59 (W = 1612.5,
+p.adj = 0.013) windows are also significant after Benjamini–Hochberg correction.
+
+No significant weekday–weekend difference is detected for cesarean deliveries
+outside the 06:00–17:59 window. Overnight (00:00–05:59), weekday and weekend
+cesarean volumes are statistically indistinguishable (p.adj > 0.75).
+
+Vaginal deliveries show no significant weekday–weekend difference in any of the
+eight time windows after correction (all p.adj > 0.09). The visual impression of
+a weekday afternoon shift does not reach statistical significance at the adjusted
+threshold.
+
+---
+
+*Filed Under. Observed in the wild.*

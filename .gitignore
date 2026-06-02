@@ -1,0 +1,13 @@
+# R
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+*.nb.html
+
+# Private — not for publication
+render.R
+
+# OS
+.DS_Store
+Thumbs.db
